@@ -17,6 +17,13 @@
 #include "flexiv/rdk/robot.hpp"
 #include "flexiv_hardware/flexiv_hardware_interface.hpp"
 
+namespace {
+
+constexpr double kMaxJointVelocity = 2.0;
+constexpr double kMaxJointAcceleration = 3.0;
+
+}
+
 namespace flexiv_hardware {
 
 hardware_interface::CallbackReturn FlexivHardwareInterface::on_init(
@@ -257,7 +264,7 @@ hardware_interface::return_type FlexivHardwareInterface::read(
         hw_states_joint_efforts_ = robot_->states().tau;
 
         // Read GPIO input states
-        auto gpio_in = robot_->ReadDigitalInput();
+        auto gpio_in = robot_->digital_inputs();
         for (size_t i = 0; i < hw_states_gpio_in_.size(); i++) {
             hw_states_gpio_in_[i] = static_cast<double>(gpio_in[i]);
         }
@@ -274,6 +281,9 @@ hardware_interface::return_type FlexivHardwareInterface::write(
     std::vector<double> target_vel(robot_->info().DoF);
     std::vector<double> target_acc(robot_->info().DoF);
 
+    std::vector<double> max_vel(robot_->info().DoF, kMaxJointVelocity);
+    std::vector<double> max_acc(robot_->info().DoF, kMaxJointAcceleration);
+
     bool isNanPos = false;
     bool isNanVel = false;
     bool isNanEff = false;
@@ -289,15 +299,15 @@ hardware_interface::return_type FlexivHardwareInterface::write(
         }
     }
 
-    if (position_controller_running_ && robot_->mode() == flexiv::rdk::Mode::RT_JOINT_POSITION
+    if (position_controller_running_ && robot_->mode() == flexiv::rdk::Mode::NRT_JOINT_POSITION
         && !isNanPos) {
         target_pos = hw_commands_joint_positions_;
-        robot_->StreamJointPosition(target_pos, target_vel, target_acc);
+        robot_->SendJointPosition(target_pos, target_vel, target_acc, max_vel, max_acc);
     } else if (velocity_controller_running_
-               && robot_->mode() == flexiv::rdk::Mode::RT_JOINT_POSITION && !isNanVel) {
+               && robot_->mode() == flexiv::rdk::Mode::NRT_JOINT_POSITION && !isNanVel) {
         target_pos = hw_commands_joint_positions_;
         target_vel = hw_commands_joint_velocities_;
-        robot_->StreamJointPosition(target_pos, target_vel, target_acc);
+        robot_->SendJointPosition(target_pos, target_vel, target_acc, max_vel, max_acc);
     } else if (torque_controller_running_ && robot_->mode() == flexiv::rdk::Mode::RT_JOINT_TORQUE
                && !isNanEff) {
         std::vector<double> target_torque(robot_->info().DoF);
@@ -315,8 +325,18 @@ hardware_interface::return_type FlexivHardwareInterface::write(
         ports_indices.push_back(i);
         ports_values.push_back(static_cast<bool>(hw_commands_gpio_out_[i]));
     }
+    // Check if there are changes in the digital output values
+    bool digital_outputs_changed = false;
+    if (current_ports_indices_ != ports_indices || current_ports_values_ != ports_values) {
+        digital_outputs_changed = true;
+    }
+    current_ports_indices_ = ports_indices;
+    current_ports_values_ = ports_values;
 
-    robot_->WriteDigitalOutput(ports_indices, ports_values);
+    // Set digital outputs
+    if (!ports_indices.empty() && !ports_values.empty() && digital_outputs_changed) {
+        robot_->SetDigitalOutputs(ports_indices, ports_values);
+    }
 
     return hardware_interface::return_type::OK;
 }
@@ -410,7 +430,7 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
             std::numeric_limits<double>::quiet_NaN());
 
         // Set to joint position mode
-        robot_->SwitchMode(flexiv::rdk::Mode::RT_JOINT_POSITION);
+        robot_->SwitchMode(flexiv::rdk::Mode::NRT_JOINT_POSITION);
 
         position_controller_running_ = true;
     } else if (start_modes_.size() != 0
@@ -425,7 +445,7 @@ hardware_interface::return_type FlexivHardwareInterface::perform_command_mode_sw
             std::numeric_limits<double>::quiet_NaN());
 
         // Set to joint position mode
-        robot_->SwitchMode(flexiv::rdk::Mode::RT_JOINT_POSITION);
+        robot_->SwitchMode(flexiv::rdk::Mode::NRT_JOINT_POSITION);
 
         velocity_controller_running_ = true;
     } else if (start_modes_.size() != 0
